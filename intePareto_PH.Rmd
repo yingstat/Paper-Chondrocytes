@@ -1,0 +1,479 @@
+---
+title: "Integrative analysis of RNA-Seq and ChIP-Seq with intePareto package"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "../")
+```
+
+
+ * Input:  
+  
+    * matched RNA-Seq and ChIP-Seq data from PH dataset:
+        * RNA-Seq 
+        * ChIP-Seq 
+        
+  * Goal:   
+      * 1. to find the correlation relationship between RNA-Seq and ChIP-Seq
+      * 2. find the gene that show congrunt changes both in RNA-Seq and ChIP-Seq
+  
+  
+  * Challenges:
+
+      * 1. one gene have different transcripts, several TSS and several promoters
+      * 2. enhancer-target gene relationship
+      * 3. normalize ChIP-Seq reads that fall into specific regions (promoter, enhancer, genebody)
+      
+  * Solutions: 
+  
+      * 1.
+          * 1) Weighted.Mean: Calculate the mean promoter density  
+          
+          * 2) Highest: Choose the largest value among all the promoter density  
+          
+
+### 1.meta data of PH dataset
+```{r, eval=FALSE}
+# load required package
+library(intePareto)
+ph.rna.meta <- data.frame(condition = c("PC","PC","HC","HC"),
+                          files = file.path("./data/CLEANkallisto", c("CLEANoutputP1","CLEANoutputP2","CLEANoutputH3","CLEANoutputH4"), "abundance.tsv"))
+ph.rna.meta$files <- as.character(ph.rna.meta$files)
+
+## path  where the bam files
+p.bamfiles <- list.files(path = "../pareto/data/align_chip/PC",
+                         pattern = "\\.bam$",
+                         full.names = TRUE)
+h.bamfiles <- list.files(path = "../pareto/data/align_chip/HC",
+                         pattern = "\\.bam$",
+                         full.names = TRUE)
+
+all.bamfiles <- c(p.bamfiles, h.bamfiles)
+
+ph.chip.meta <- NULL
+ph.chip.meta$mark <- do.call(rbind, strsplit(x = all.bamfiles, split = "_"))[,4]
+ph.chip.meta$condition <- do.call(rbind, strsplit(x = all.bamfiles, split = "_"))[,3]
+ph.chip.meta$files <- all.bamfiles
+
+ph.chip.meta <- as.data.frame(ph.chip.meta)
+ph.chip.meta$files <- as.character(ph.chip.meta$files)
+
+ph.chip.meta.noH3K36me3 <- ph.chip.meta[which(ph.chip.meta$mark!="H3K36me3"),]
+ph.chip.meta.H3K36me3 <- ph.chip.meta[which(ph.chip.meta$mark=="H3K36me3"),]
+```
+
+
+
+### 2. doMatch 
+        
+```{r, eval=FALSE}
+# promoter
+# biomaRt::listEnsemblArchives()
+ph.res.noH3K36me3 <- doMatch(rnaMeta = ph.rna.meta, 
+                  chipMeta = ph.chip.meta.noH3K36me3,
+                  region = "promoter",
+                  method = "highest",
+                  fragLength = 180,
+                  ensemblDataset = "mmusculus_gene_ensembl",
+                  host = "http://aug2017.archive.ensembl.org",
+                  promoter.length = 5000)
+
+# genebody
+ph.res.H3K36me3 <- doMatch(rnaMeta = ph.rna.meta, 
+                  chipMeta = ph.chip.meta.H3K36me3,
+                  method = "highest", # we don't need this parameter if we choose genebody, but it doesn't matter if we choose
+                  ensemblDataset = "mmusculus_gene_ensembl",
+                  host = "http://aug2017.archive.ensembl.org",
+                  region = "genebody")
+
+
+ph.res.noH3K36me3$matched.data <- merge(ph.res.noH3K36me3$matched.data,
+                             ph.res.H3K36me3$matched.data)
+ph.res.noH3K36me3$res.chip <- merge(ph.res.noH3K36me3$res.chip,
+                             ph.res.H3K36me3$res.chip)
+ph.res <- ph.res.noH3K36me3
+saveRDS(ph.res, file = "./data/ph.res.rds")
+
+```
+
+
+### 3. doIntegration with 1 TPM threshold (You can play with it start from here)
+
+```{r}
+ph.res <- readRDS(file = "./data/ph.res.rds")
+## use 1TPM filtering results
+de <- read.csv(file = "./results/sleuth.results.WT.gene_log2FC.csv", header = TRUE, stringsAsFactors = FALSE)
+ph.res$res.rna <- ph.res$res.rna[ph.res$res.rna$external_gene_name%in%de$ext_gene,]
+ph.res$res.chip <- ph.res$res.chip[ph.res$res.chip$external_gene_name%in%de$ext_gene,]
+ph.res$matched.data <- ph.res$matched.data[ph.res$matched.data$external_gene_name%in%de$ext_gene,]
+ph.df <- doIntegration(res = ph.res,
+                       ref = "HC")
+saveRDS(ph.df, file = "./data/ph.df.rds")
+
+
+```
+
+
+### 4. doPareto with all marks
+
+```{r}
+ph.df <- readRDS(file = "./data/ph.df.rds")
+ph.objective <- data.frame(mark = c("z.H3K36me3","z.H3K27ac","z.H3K9me3","z.H3K9ac","z.H3K4me3","z.H3K27me3"),
+                           obj = c("max","max","min","max","max","min"))
+ph.final.df <- doPareto(df_final = ph.df, objective = ph.objective, nr.fronts = 100)
+saveRDS(ph.final.df, file = "./data/ph.final.df.rds")
+
+ph.final.df <- readRDS(file = "./data/ph.final.df.rds")
+write.csv(ph.final.df, file = "./results/ph.final.df.csv")
+
+```
+
+#### doPareto without H3K9me3
+```{r}
+ph.df <- readRDS(file = "./data/ph.df.rds")
+ph.objective <- data.frame(mark = c("z.H3K36me3","z.H3K27ac","z.H3K9ac","z.H3K4me3","z.H3K27me3"),
+                           obj = c("max","max","max","max","min"))
+ph.final.df <- doPareto(df_final = ph.df, objective = ph.objective, nr.fronts = 100)
+saveRDS(ph.final.df, file = "./data/ph.final.dfwoH3K9me3.rds")
+write.csv(ph.final.df, file = "./results/ph.final.dfwoH3K9me3.csv")
+```
+
+
+#### doPareto without H3K36me3 and H3K9me3
+```{r}
+ph.df <- readRDS(file = "./data/ph.df.rds")
+ph.objective <- data.frame(mark = c("z.H3K27ac","z.H3K9ac","z.H3K4me3","z.H3K27me3"),
+                           obj = c("max","max","max","min"))
+ph.final.df <- doPareto(df_final = ph.df, objective = ph.objective, nr.fronts = 100)
+saveRDS(ph.final.df, file = "./data/ph.final.dfwoH3K9me3H3K36me3.rds")
+write.csv(ph.final.df, file = "./results/ph.final.dfwoH3K9me3H3K36me3.csv")
+```
+
+#### doPareto with only active marks (H3K4me3, H3K27ac, H3K9ac)
+
+```{r}
+ph.df <- readRDS(file = "./data/ph.df.rds")
+ph.objective <- data.frame(mark = c("z.H3K27ac","z.H3K9ac","z.H3K4me3"),
+                           obj = c("max","max","max"))
+ph.final.df <- doPareto(df_final = ph.df, objective = ph.objective, nr.fronts = 500)
+saveRDS(ph.final.df, file = "./data/ph.final.dfactive.rds")
+write.csv(ph.final.df, file = "./results/ph.final.dfactive.csv")
+```
+
+
+
+### Loop over all possible combinations
+
+```{r}
+ph.df <- readRDS(file = "./data/ph.df.rds")
+ph.df <- ph.df[,colnames(ph.df)!="z.Igg"]
+z.c <- grep("z.", colnames(ph.df), value = TRUE)
+names(z.c) <- c("max", "min", "max", "max", "min", "max") 
+
+z.t <- data.frame(z.mark = z.c, f.mark = names(z.c))
+comb.mark <- function(ph.df, z.t){
+m <- data.frame(gene = rownames(ph.df))
+for (i in 2:6) {
+  cat(i,"\n")
+  # browser()
+  com <- combn(z.t$z.mark,i)
+  for (j in 1:ncol(com)) {
+    ph.objective <- data.frame(mark = com[,j],
+                               obj = z.t[z.t$z.mark%in%com[,j],]$f.mark)
+    df <- doPareto(df_final = ph.df, objective = ph.objective, nr.fronts = 10000)
+    final.v <- data.frame(gene = rownames(df), front = df$front)
+    colnames(final.v) <- c("gene", paste(com[,j], collapse = "_"))
+    m <- merge(m,final.v, by = "gene")
+   
+  }
+  
+}
+return(m)
+}
+
+mn <- comb.mark(ph.df, z.t)
+mn <- as.data.frame(mn)
+mn$mean <- rowMeans(mn[,-1])
+write.csv(mn, file = "./results/ph.final.allcomb.csv")
+
+```
+
+
+```{r, fig.width=21, fig.height=21}
+
+jpeg("./figures/allcomb.jpeg", width = 5200, height = 5200,  res = 350)
+par(mfrow=c(7,8))
+cln <- colnames(mn[,1:56])
+for (n in cln) {
+  plot(mn[,57], mn[[n]], xlab = "all marks", col="steelblue")
+}
+dev.off()
+
+```
+
+
+
+### Visualization correlation of RNAseq and ChIPseq
+
+```{r, fig.height=8, fig.width=8}
+ph.res <- readRDS("./data/ph.res.rds")
+## use 1TPM filtering results
+de <- read.csv(file = "./results/sleuth.results.WT.gene_log2FC.csv", header = TRUE, stringsAsFactors = FALSE)
+ph.res$res.rna <- ph.res$res.rna[ph.res$res.rna$external_gene_name%in%de$ext_gene,]
+ph.res$res.chip <- ph.res$res.chip[ph.res$res.chip$external_gene_name%in%de$ext_gene,]
+ph.res$matched.data <- ph.res$matched.data[ph.res$matched.data$external_gene_name%in%de$ext_gene,]
+
+ph.matched.data <- ph.res$matched.data
+
+rownames(ph.matched.data) <- ph.matched.data$external_gene_name
+ph.matched.data <- ph.matched.data[,-1]
+
+ph.cor.res <- cor(ph.matched.data, method = "spearman")
+
+library(ComplexHeatmap)
+library(circlize)
+cols <- colorRampPalette(c("darkblue","white","brown"))(20)
+
+pdf("./figures/ph_cor_matrix.pdf", width = 7, height = 7)
+Heatmap(ph.cor.res,
+        col = circlize::colorRamp2(seq(from=-1, to=1, length.out = 20), cols), 
+        show_row_names=TRUE,
+        column_names_max_height = unit(6, "cm"),
+        column_names_gp = gpar(fontsize = 8),
+        row_names_max_width = unit(6, "cm"),
+        row_names_gp = gpar(fontsize = 8),
+        heatmap_legend_param = list(title="Cor", color_bar="continuous" ))
+dev.off()
+
+
+
+jpeg("./figures/ph_cor_matrix.jpeg", width = 3500, height = 3500,  res = 500)
+Heatmap(ph.cor.res,
+        col = circlize::colorRamp2(seq(from=-1, to=1, length.out = 20), cols), 
+        show_row_names=TRUE,
+        column_names_max_height = unit(6, "cm"),
+        column_names_gp = gpar(fontsize = 8),
+        row_names_max_width = unit(6, "cm"),
+        row_names_gp = gpar(fontsize = 8),
+        heatmap_legend_param = list(title="Cor", color_bar="continuous" ))
+dev.off()
+
+```
+
+
+### Visualization correlation of RNAseq and ChIPseq separately 
+
+```{r, fig.height=8, fig.width=8}
+ph.res <- readRDS("./data/ph.res.rds")
+ph.matched.data <- ph.res$matched.data
+
+```
+
+#### P cells
+```{r}
+tiff("./figures/RNAseq-H3K9ac-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K9ac_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K9ac", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K9ac_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K27ac-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K27ac_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K27ac", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K27ac_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K36me3-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K36me3_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K36me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K36me3_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K9me3-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K9me3_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K9me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K9me3_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K4me3-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K4me3_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K4me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K4me3_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K27me3-P.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$PC_REP1+1), 
+              log2(ph.matched.data$H3K27me3_HM_PC_REP1+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K27me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K27me3_HM_PC_REP1+1)~log2(ph.matched.data$PC_REP1+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+```
+
+
+#### H cells
+```{r}
+tiff("./figures/RNAseq-H3K9ac-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K9ac_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K9ac", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K9ac_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K27ac-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K27ac_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K27ac", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K27ac_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K36me3-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K36me3_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K36me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K36me3_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K9me3-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K9me3_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K9me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K9me3_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K4me3-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K4me3_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K4me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K4me3_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+
+tiff("./figures/RNAseq-H3K27me3-H.tiff", width = 3.5, height = 3, units = "in", res = 300)
+par(mar = c(3.2,3.2,1,1))
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(ph.matched.data$HC_REP2+1), 
+              log2(ph.matched.data$H3K27me3_HM_HC_REP2+1),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="RNA-Seq", line=2, cex = 1)
+mtext(side=2, text="ChIP-Seq of H3K27me3", line=2, cex = 1)
+lo <- lowess(log2(ph.matched.data$H3K27me3_HM_HC_REP2+1)~log2(ph.matched.data$HC_REP2+1))
+lines(lo, col='red', lwd=1.5)
+dev.off()
+```
+
+
+
+
+### Visualization correlation of logFC of RNAseq and logFC of ChIPseq
+```{r, fig.height=4, fig.width=4}
+ph.df <- readRDS("./data/ph.df.rds")
+ph.logfc <- ph.df[,1:8]
+colnames(ph.logfc) <-  gsub("log2FoldChange", "log2FC", colnames(ph.logfc))
+ph.cor.logfc <- cor(ph.logfc)
+
+library(ComplexHeatmap)
+library(circlize)
+cols <- colorRampPalette(c("darkblue","white","brown"))(20)
+pdf("./figures/ph_cor_logfc_matrix.pdf", width = 4, height = 3)
+Heatmap(ph.cor.logfc,
+        col = circlize::colorRamp2(seq(from=-0.33, to=0.33, length.out = 20), cols), 
+        show_row_names=TRUE,
+        column_names_max_height = unit(6, "cm"),
+        column_names_gp = gpar(fontsize = 8),
+        row_names_max_width = unit(6, "cm"),
+        row_names_gp = gpar(fontsize = 8),
+        heatmap_legend_param = list(title="Cor", color_bar="continuous" ))
+dev.off()
+
+jpeg("./figures/ph_cor_logfc_matrix.jpeg", width = 2000, height = 1700,  res = 600)
+Heatmap(ph.cor.logfc,
+        col = circlize::colorRamp2(seq(from=-0.33, to=0.33, length.out = 20), cols), 
+        show_row_names=TRUE,
+        column_names_max_height = unit(6, "cm"),
+        column_names_gp = gpar(fontsize = 8),
+        row_names_max_width = unit(6, "cm"),
+        row_names_gp = gpar(fontsize = 8),
+        heatmap_legend_param = list(title="Cor", color_bar="continuous" ))
+dev.off()
+
+```
+
+
+
+
+
+

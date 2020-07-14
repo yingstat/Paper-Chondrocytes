@@ -1,0 +1,447 @@
+---
+title: "Sleuth PH"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "../")
+```
+
+
+* Input:  
+
+* RNA-Seq fastq files:
+* preprocessed with Trimmomatic "./scripts/clean.s", parameters and tools used can 
+be seen in the shell script.
+* clean RNA-Seq data was quantified with pseudo-aligner Kallisto "./scripts/cleankallisto.s"
+an important feature of kallisto is that it outputs bootstraps along with the estimates of transcript abundances, which can serve as proxies for technical replicates, and thus allowing for an ascertainment of the variability in estimates due to random processes underlying RNA-Seq as well as the statistical procedure of read assignment.
+
+* Goal:   
+* 1. to get the gene-level TPM expression value 
+* 2. to find and visualize the differential expressed genes in volcano plot.
+
+
+
+## Preparations for the sleuth analysis PH
+
+```{r}
+# load required packages
+# devtools::install_github("pachterlab/sleuth")
+# BiocManager::install("rhdf5")
+suppressMessages({
+  # library("biomaRt")
+  library("sleuth")
+})
+```
+
+
+
+```{r}
+# create an ausillary table that describes the experimental design and the relationship between the kallisto directories and the samples
+mapping.file <- data.frame(sample = c("P1","P2","H3","H4"),
+                           condition = c("P","P","H","H"),
+                           stringsAsFactors = FALSE)
+
+
+# append a new column to describe the path of the kallisto quantifications
+mapping.file$path <- paste("./data/CLEANkallisto/CLEANoutput", mapping.file$sample, sep = '')
+
+transcript2gene <- read.delim("./data/transcript2gene.txt", header = TRUE, sep = "\t")
+```
+
+
+
+
+## gene-level tpms output after filtering 1 tpm genes
+
+```{r}
+
+s2c <- mapping.file
+
+sleuth.obj <- sleuth_prep(sample_to_covariates = s2c, 
+                          target_mapping = transcript2gene, 
+                          extra_bootstrap_summary = TRUE,
+                          read_bootstrap_tpm = TRUE, 
+                          aggregation_column = 'ens_gene',
+                          gene_mode = TRUE,
+                          num_cores = 4)
+
+sleuth.obj$gene_mode
+
+
+
+tpms <- sleuth_to_matrix(sleuth.obj, "obs_norm", "tpm")
+
+tpms <- as.data.frame(tpms)
+tpms$ens_gene <- rownames(tpms)
+tpms$ext_gene <- sleuth.obj$target_mapping$ext_gene[match(tpms$ens_gene, sleuth.obj$target_mapping$ens_gene)]
+rownames(tpms) <- NULL
+write.csv(tpms, file = "./results/tpms_gene.csv", row.names = FALSE)
+
+ind <- rowSums(tpms[,1:4]>=1) >= 4
+
+tpms <- tpms[ind,]
+write.csv(tpms, file = "./results/tpms_gene_1tpm.csv", row.names = FALSE)
+
+```
+
+## check the filtering 
+
+```{r}
+tpms_gene_1tpm <- read.csv("results/tpms_gene_1tpm.csv", header = TRUE, stringsAsFactors = FALSE)
+genefilter <- tpms_gene_1tpm$ens_gene
+txfilter <- transcript2gene[transcript2gene$ens_gene%in%genefilter,]
+sleuth.obj <- sleuth_prep(sample_to_covariates = s2c, 
+                          target_mapping = txfilter, 
+                          extra_bootstrap_summary = TRUE,
+                          # filter_target_id = txfilter,
+                          read_bootstrap_tpm = TRUE, 
+                          aggregation_column = 'ens_gene',
+                          pval_aggregate = TRUE,
+                          gene_mode = TRUE,
+                          num_cores = 4)
+tpms2 <- sleuth_to_matrix(sleuth.obj, "obs_norm", "tpm")
+tpms2 <- as.data.frame(tpms2)
+plot(tpms$H3, tpms2$H3) ## the same
+unique(tpms$H3==tpms2$H3)
+save(sleuth.obj, file = "./data/inte_processed_data/sleuth.obj.RData")
+
+load("./data/inte_processed_data/sleuth.obj.RData")
+library(ggplot2)
+sleuth::plot_pca(obj = sleuth.obj, 
+                 color_by = 'condition',
+                 units = 'scaled_reads_per_base',
+                 text_labels = TRUE)+
+  ggtitle("PCA")+
+  theme_bw()
+```
+
+```{r}
+
+## scatterplot for quality control
+tpms_gene_1tpm <- read.csv("results/tpms_gene_1tpm.csv", header = TRUE, stringsAsFactors = FALSE)
+
+tiff("./figures/scatterplot_qc_p.tiff", width = 4, height = 4, units = "in",res = 300)
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(tpms_gene_1tpm$P1), 
+              log2(tpms_gene_1tpm$P2),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="P.rep1", line=2.3, cex = 0.8)
+mtext(side=2, text="P.rep2", line=2.3, cex = 0.8)
+abline(coef = c(0,1), col="red")
+dev.off()
+
+tiff("./figures/scatterplot_qc_h.tiff", width = 4, height = 4, units = "in",res = 300)
+Lab.palette <- colorRampPalette(c("white", blues9), space = "Lab")
+smoothScatter(log2(tpms_gene_1tpm$H3), 
+              log2(tpms_gene_1tpm$H4),
+              xlab = "", ylab = "",
+              colramp = Lab.palette)
+mtext(side=1, text="H.rep1", line=2.3, cex = 0.8)
+mtext(side=2, text="H.rep2", line=2.3, cex = 0.8)
+abline(coef = c(0,1), col="red")
+dev.off()
+
+
+tiff("./figures/scatterplot_qc_p_v1.tiff", width = 4.5, height = 4, units = "in",res = 300)
+library(ggplot2)
+ggplot(data = tpms_gene_1tpm,aes(x = P1, y = P2)) + 
+  geom_point(pch=21,bg = "lightblue") + 
+  geom_abline(intercept = 0, slope = 1, colour = "black") +
+  theme_classic()+
+  scale_x_continuous(trans = "log2")+
+  scale_y_continuous(trans = "log2")+
+  labs(x="P.rep1",y="P.rep2")
+dev.off()
+cor.test(log2(tpms_gene_1tpm$P1), log2(tpms_gene_1tpm$P2),method ="spearman")
+
+tiff("./figures/scatterplot_qc_h_v1.tiff", width = 4.5, height = 4, units = "in",res = 300)
+library(ggplot2)
+ggplot(data = tpms_gene_1tpm,aes(x = H3, y = H4)) + 
+  geom_point(pch=21,bg = "lightblue") + 
+  geom_abline(intercept = 0, slope = 1, colour = "black") +
+  theme_classic()+
+  scale_x_continuous(trans = "log2")+
+  scale_y_continuous(trans = "log2")+
+  labs(x="H.rep1",y="H.rep2")
+dev.off()
+cor.test(log2(tpms_gene_1tpm$H3), log2(tpms_gene_1tpm$H4),method ="spearman")
+
+```
+
+
+## do Differential (gene) expression analysis with sleuth after filtering 1 TPM genes
+```{r}
+load("./data/inte_processed_data/sleuth.obj.RData")
+## Differential (gene) expression analysis with sleuth
+
+#Internally, with sleuth_prep Sleuth will transform elements in the condition field to 0s and 1s in alphabetical order and then WT's beta values will be relative to the 0 condition; that is, positive beta values showing transcripts in which expression is greater in condition 1 than in condition 0.
+# 1. Fit the full model
+sleuth.obj <- sleuth::sleuth_fit(obj = sleuth.obj, 
+                                 formula = ~condition, 
+                                 fit_name = 'full')
+design_matrix(sleuth.obj)
+# 2. fit a reduced model that only includes the intercept
+sleuth.obj <- sleuth::sleuth_fit(obj = sleuth.obj, 
+                                 formula = ~1, 
+                                 fit_name = 'reduced')
+
+models(sleuth.obj)
+# 3. Compute the differential expression statistics WT test
+# WT is used becase it generates the beta statistic, which approximates to the log2 fold change in expression between the 2 condition tested.
+sleuth.obj.wt <- sleuth::sleuth_wt(obj = sleuth.obj, 
+                                   which_beta = "conditionP", 
+                                   which_model = 'full')
+
+
+# 4. Extract the statistics with WT test
+sleuth.results.WT <- sleuth_results(obj = sleuth.obj.wt, 
+                                    test = "conditionP", 
+                                    test_type = "wt", 
+                                    which_model = "full",
+                                    show_all = FALSE, 
+                                    pval_aggregate = sleuth.obj.wt$pval_aggregate)
+
+sleuth.results.WT_log2FC <- merge(tpms, sleuth.results.WT, by.x = c("ens_gene","ext_gene"), by.y = c("target_id","ext_gene"))
+
+write.csv(x = sleuth.results.WT_log2FC, file = "./results/sleuth.results.WT.gene_log2FC.csv")
+nrow(sleuth.results.WT[sleuth.results.WT$qval<=0.05,])
+
+# 5. Compute the differential expression statistics LRT test
+sleuth.obj.lrt <- sleuth_lrt(obj = sleuth.obj,
+                             null_model = 'reduced',
+                             alt_model = 'full')
+
+
+# 6. Make a table of the LRT results via:
+
+sleuth.results.LRT <- sleuth::sleuth_results(sleuth.obj.lrt, 'reduced:full', test_type = 'lrt', show_all = FALSE)
+
+nrow(sleuth.results.LRT[sleuth.results.LRT$qval<=0.05,])
+# 8. Write the differential expression statistics as CSV file LRT test
+write.csv(x = sleuth.results.LRT, file = "./results/sleuth.results.LRT.csv")
+
+```
+
+## GO enrichment analysis of DE results
+```{r}
+df <- read.csv(file = "./results/sleuth.results.WT.gene_log2FC.csv", header = TRUE, stringsAsFactors = FALSE)
+
+
+library("clusterProfiler")
+library(org.Mm.eg.db)
+
+gene <- df[df$qval<0.05,]$ens_gene
+
+gene.en <- bitr(gene, fromType = "ENSEMBL",
+                toType = c("ENTREZID"),
+                OrgDb = org.Mm.eg.db)
+
+
+#GO over-representation test
+ego <- enrichGO(gene          = gene.en$ENTREZID,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "fdr",
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+
+
+# top 50 terms
+pdf("./figures/sleuth_sig_de_ego.pdf", width = 12, height = 12) 
+barplot(ego,showCategory=50,horiz = TRUE)
+dev.off()
+
+jpeg("./figures/sleuth_sig_de_ego.jpeg", width = 6000, height = 5000,  res = 500)
+barplot(ego,showCategory=50,horiz = TRUE)
+dev.off()
+# top 15 terms
+jpeg("./figures/sleuth_sig_de_ego_15.jpeg", width = 4800, height = 2000,  res = 650)
+barplot(ego,showCategory=15,horiz = TRUE)
+dev.off()
+```
+
+## GO enrichment for up-regulated and down-regulated genes
+
+```{r}
+library("clusterProfiler")
+df <- read.csv(file = "./results/sleuth.results.WT.gene_log2FC.csv", header = TRUE, stringsAsFactors = FALSE)
+df <- df[df$qval<0.05,]
+df$category <- ifelse(test = df$b > 0, yes = "P", no = "H")
+
+
+cego <- compareCluster(data = df, ## GO enrichment of all DE genes
+                       geneClusters = ens_gene~category,
+                       fun = "enrichGO", 
+                       pvalueCutoff = 0.05, 
+                       pAdjustMethod = "fdr", 
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "ENSEMBL",
+                       ont = "BP",
+                       readable = TRUE)
+
+tiff("./figures/sleuth_sig_de_ego_up_down_10.tiff", width = 7, height = 3, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 5, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+tiff("./figures/sleuth_sig_de_ego_up_down_12.tiff", width = 7, height = 3.5, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 6, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+tiff("./figures/sleuth_sig_de_ego_up_down_14.tiff", width = 7, height = 4, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 7, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+tiff("./figures/sleuth_sig_de_ego_up_down_16.tiff", width = 7, height = 4.2, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 8, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+tiff("./figures/sleuth_sig_de_ego_up_down_18.tiff", width = 7, height = 4.5, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 9, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+tiff("./figures/sleuth_sig_de_ego_up_down_20.tiff", width = 7, height = 5, units = "in",res = 300)
+library(ggplot2)
+dotplot(object = cego, showCategory = 10, 
+        title="")+
+  theme(plot.title = element_text(hjust = 0.5,size = 18))
+dev.off()
+
+
+```
+
+
+## Images of the differential gene expdesion analysis of RNA-Seq Volcano plot
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+results <- read.csv(file = "./results/sleuth.results.WT.gene_log2FC.csv", header = TRUE, stringsAsFactors = FALSE)
+results <- results %>% dplyr::distinct(ext_gene, qval, pval, b, .keep_all=TRUE)
+results$sig <- ifelse(results$qval<0.05, TRUE, FALSE)
+p = ggplot(results, aes(b, -log10(qval))) +
+  geom_point(aes(col=sig),alpha=0.5) +
+  scale_color_manual(values=c("black", "red3"))+
+  labs(x = "beta value", colour = "significant")+
+  theme_classic()
+p
+
+lowqval <- results[order(results$qval),][1:50,]
+library(ggrepel)
+library(grid)
+library(dplyr)
+p+
+  geom_vline(xintercept = 0, linetype="dashed")+
+  geom_text_repel(data = lowqval,
+                  aes(label=ext_gene), 
+                  size = 2.5)+
+  geom_text_repel(data = results %>%
+                    filter(qval<0.05) %>%
+                    filter(!ext_gene%in%lowqval$ext_gene) %>%
+                    filter(abs(b)>3),
+                  aes(label=ext_gene), size=2.5)+
+  geom_segment(aes(x = 2, y = 24, xend = 4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = 3, y = 25, label = "up regulated", col = "black")+
+  geom_segment(aes(x = -2, y = 24, xend = -4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = -3, y = 25, label = "down regulated", col = "black")+
+  ylim(0,25.5)
+pdf("./figures/volcano_ph.pdf", width = 6, height = 5)
+p+
+  geom_vline(xintercept = 0, linetype="dashed")+
+  geom_text_repel(data = lowqval,
+                  aes(label=ext_gene), 
+                  size = 2.5)+
+  geom_text_repel(data = results %>%
+                    filter(qval<0.05) %>%
+                    filter(!ext_gene%in%lowqval$ext_gene) %>%
+                    filter(abs(b)>3),
+                  aes(label=ext_gene), size=2.5)+
+  geom_segment(aes(x = 2, y = 24, xend = 4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = 3, y = 25, label = "up regulated", col = "black")+
+  geom_segment(aes(x = -2, y = 24, xend = -4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = -3, y = 25, label = "down regulated", col = "black")+
+  ylim(0,25.5)
+dev.off()
+
+
+pdf("./figures/volcano_ph_woanno.pdf", width = 6, height = 5)
+p+
+  geom_vline(xintercept = 0, linetype="dashed")+
+  geom_segment(aes(x = 2, y = 24, xend = 4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = 3, y = 25, label = "up regulated", col = "black")+
+  geom_segment(aes(x = -2, y = 24, xend = -4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = -3, y = 25, label = "down regulated", col = "black")+
+  ylim(0,25.5)
+dev.off()
+
+
+jpeg("./figures/volcano_ph.jpeg", width = 3000, height = 2500, res = 500)
+p+
+  geom_vline(xintercept = 0, linetype="dashed")+
+  geom_text_repel(data = lowqval,
+                  aes(label=ext_gene), 
+                  size = 2.5)+
+  geom_text_repel(data = results %>%
+                    filter(qval<0.05) %>%
+                    filter(!ext_gene%in%lowqval$ext_gene) %>%
+                    filter(abs(b)>3),
+                  aes(label=ext_gene), size=2.5)+
+  geom_segment(aes(x = 2, y = 24, xend = 4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = 3, y = 25, label = "up regulated", col = "black")+
+  geom_segment(aes(x = -2, y = 24, xend = -4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = -3, y = 25, label = "down regulated", col = "black")+
+  ylim(0,25.5)
+dev.off()
+
+jpeg("./figures/volcano_ph_woanno.jpeg", width = 3000, height = 2500,  res = 500)
+p+
+  geom_vline(xintercept = 0, linetype="dashed")+
+  geom_segment(aes(x = 2, y = 24, xend = 4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = 3, y = 25, label = "up regulated", col = "black")+
+  geom_segment(aes(x = -2, y = 24, xend = -4, yend = 24),
+               arrow = arrow(length = unit(0.2, "cm")),
+               col = "black") +
+  geom_text(x = -3, y = 25, label = "down regulated", col = "black")+
+  ylim(0,25.5)
+dev.off()
+
+```
+
