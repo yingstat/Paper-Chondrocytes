@@ -8,5 +8,5 @@ java -jar ~/yingying/software/Trimmomatic-0.36/trimmomatic-0.36.jar PE -threads 
 ILLUMINACLIP:adapters.fasta:2:30:10 HEADCROP:10 LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:36
 mkdir clean_fastqc_out
 fastqc -o clean_fastqc_out ./${base}.clean_1.fastq.gz ./${base}.clean_2.fastq.gz
-multiqc ./clean_fastqc_out
 done
+multiqc ./clean_fastqc_out
